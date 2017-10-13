@@ -696,15 +696,15 @@ static void ssl_write_alpn_ext( mbedtls_ssl_context *ssl,
       */
 
      /* Extension length = 2bytes for profiles lenght, ssl->dtls_srtp_profiles_list_len*2 (each profile is 2 bytes length )  1 byte for the non implemented srtp_mki vector length (always 0) */
-     *p = (unsigned char)( ( ( 2  2*(ssl->dtls_srtp_profiles_list_len)  1 ) >> 8 ) & 0xFF );
-     *p = (unsigned char)( ( ( 2  2*(ssl->dtls_srtp_profiles_list_len)  1 )      ) & 0xFF );
+     *p = (unsigned char)( ( ( 2 + 2*(ssl->dtls_srtp_profiles_list_len) + 1 ) >> 8 ) & 0xFF );
+     *p = (unsigned char)( ( ( 2 + 2*(ssl->dtls_srtp_profiles_list_len) + 1 )      ) & 0xFF );
 
 
      /* protection profile length: 2*(ssl->dtls_srtp_profiles_list_len) */
      *p = (unsigned char)( ( ( 2*(ssl->dtls_srtp_profiles_list_len) ) >> 8 ) & 0xFF );
      *p = (unsigned char)( ( 2*(ssl->dtls_srtp_profiles_list_len) ) & 0xFF );
 
-     for( protection_profiles_index=0; protection_profiles_index < ssl->dtls_srtp_profiles_list_len; protection_profiles_index )
+     for( protection_profiles_index=0; protection_profiles_index < ssl->dtls_srtp_profiles_list_len; protection_profiles_index++ )
      {
          switch (ssl->dtls_srtp_profiles_list[protection_profiles_index]) {
              case MBEDTLS_SRTP_AES128_CM_HMAC_SHA1_80:
@@ -732,7 +732,7 @@ static void ssl_write_alpn_ext( mbedtls_ssl_context *ssl,
 
      *p = 0x00;  /* non implemented srtp_mki vector length is always 0 */
      /* total extension length: extension type (2 bytes)  extension length (2 bytes)  protection profile length (2 bytes)  2*nb protection profiles  srtp_mki vector length(1 byte)*/
-     *olen = 2  2  2  2*(ssl->dtls_srtp_profiles_list_len)  1;
+     *olen = 2 + 2 + 2 + 2*(ssl->dtls_srtp_profiles_list_len) + 1;
  }
 #endif /* MBEDTLS_SSL_DTLS_SRTP */
 

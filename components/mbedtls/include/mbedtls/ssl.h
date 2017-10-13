@@ -331,6 +331,8 @@
 
 #define MBEDTLS_TLS_EXT_SIG_ALG                     13
 
+#define MBEDTLS_TLS_EXT_USE_SRTP                    14
+
 #define MBEDTLS_TLS_EXT_ALPN                        16
 
 #define MBEDTLS_TLS_EXT_ENCRYPT_THEN_MAC            22 /* 0x16 */

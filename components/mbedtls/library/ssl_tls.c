@@ -5679,8 +5679,6 @@ int mbedtls_ssl_setup( mbedtls_ssl_context *ssl,
     }
 
 #if defined(MBEDTLS_SSL_DTLS_SRTP)
-    ssl->dtls_srtp_profiles_list = NULL;
-    ssl->dtls_srtp_profiles_list_len = 0;
     ssl->chosen_dtls_srtp_profile = MBEDTLS_SRTP_UNSET_PROFILE;
     ssl->dtls_srtp_keys = NULL;
     ssl->dtls_srtp_keys_len = 0;
@@ -6278,7 +6276,7 @@ const char *mbedtls_ssl_get_alpn_protocol( const mbedtls_ssl_context *ssl )
 #endif /* MBEDTLS_SSL_ALPN */
 
 #if defined(MBEDTLS_SSL_DTLS_SRTP)
-int mbedtls_ssl_set_dtls_srtp_protection_profiles( mbedtls_ssl_context *ssl, const enum mbedtls_DTLS_SRTP_protection_profiles *profiles, size_t profiles_number)
+int mbedtls_ssl_conf_dtls_srtp_protection_profiles( mbedtls_ssl_config *conf, const mbedtls_dtls_srtp_protection_profiles *profiles, size_t profiles_number)
 {
     size_t i;
     /* check in put validity : must be a list of profiles from enumeration */
@@ -6287,8 +6285,8 @@ int mbedtls_ssl_set_dtls_srtp_protection_profiles( mbedtls_ssl_context *ssl, con
             return MBEDTLS_ERR_SSL_BAD_INPUT_DATA;
     }
 
-    mbedtls_free(ssl->dtls_srtp_profiles_list);
-    ssl->dtls_srtp_profiles_list = (enum mbedtls_DTLS_SRTP_protection_profiles *)mbedtls_calloc(1, profiles_number*sizeof(enum mbedtls_DTLS_SRTP_protection_profiles));
+    mbedtls_free(conf->dtls_srtp_profiles_list);
+    conf->dtls_srtp_profiles_list = (mbedtls_dtls_srtp_protection_profiles *)mbedtls_calloc(1, profiles_number*sizeof(mbedtls_dtls_srtp_protection_profiles));
 
     for (i=0; i<profiles_number; i++) {
         switch (profiles[i]) {
@@ -6296,27 +6294,40 @@ int mbedtls_ssl_set_dtls_srtp_protection_profiles( mbedtls_ssl_context *ssl, con
             case MBEDTLS_SRTP_AES128_CM_HMAC_SHA1_32:
             case MBEDTLS_SRTP_NULL_HMAC_SHA1_80:
             case MBEDTLS_SRTP_NULL_HMAC_SHA1_32:
-                ssl->dtls_srtp_profiles_list[i] = profiles[i];
+                conf->dtls_srtp_profiles_list[i] = profiles[i];
                 break;
             default:
-                mbedtls_free(ssl->dtls_srtp_profiles_list);
-                ssl->dtls_srtp_profiles_list = NULL;
-                ssl->dtls_srtp_profiles_list_len = 0;
+                mbedtls_free(conf->dtls_srtp_profiles_list);
+                conf->dtls_srtp_profiles_list = NULL;
+                conf->dtls_srtp_profiles_list_len = 0;
                 return MBEDTLS_ERR_SSL_BAD_INPUT_DATA;
         }
     }
 
     /* assign array length */
-    ssl->dtls_srtp_profiles_list_len = profiles_number;
+    conf->dtls_srtp_profiles_list_len = profiles_number;
 
     return( 0 );
 }
 
-enum mbedtls_DTLS_SRTP_protection_profiles mbedtls_ssl_get_dtls_srtp_protection_profile( const mbedtls_ssl_context *ssl)
+mbedtls_dtls_srtp_protection_profiles mbedtls_ssl_get_dtls_srtp_protection_profile( const mbedtls_ssl_context *ssl)
 {
     return( ssl->chosen_dtls_srtp_profile);
 }
 
+int mbedtls_ssl_get_dtls_srtp_key_material( const mbedtls_ssl_context *ssl, unsigned char *key, const size_t key_buffer_len, size_t *key_len ) {
+    *key_len = 0;
+
+    /* check output buffer size */
+    if ( key_buffer_len < ssl->dtls_srtp_keys_len) {
+        return MBEDTLS_ERR_SSL_BUFFER_TOO_SMALL;
+    }
+
+    memcpy( key, ssl->dtls_srtp_keys, ssl->dtls_srtp_keys_len);
+    *key_len = ssl->dtls_srtp_keys_len;
+
+    return 0;
+}
 #endif /* MBEDTLS_SSL_DTLS_SRTP */
 
 void mbedtls_ssl_conf_max_version( mbedtls_ssl_config *conf, int major, int minor )
@@ -7482,7 +7493,7 @@ void mbedtls_ssl_free( mbedtls_ssl_context *ssl )
 #endif
 
 #if defined (MBEDTLS_SSL_DTLS_SRTP)
-    mbedtls_free( ssl->dtls_srtp_profiles_list );
+    mbedtls_zeroize( ssl->dtls_srtp_keys, ssl->dtls_srtp_keys_len );
     mbedtls_free( ssl->dtls_srtp_keys );
 #endif /* MBEDTLS_SSL_DTLS_SRTP */
 
@@ -7716,6 +7727,10 @@ void mbedtls_ssl_config_free( mbedtls_ssl_config *conf )
 
 #if defined(MBEDTLS_X509_CRT_PARSE_C)
     ssl_key_cert_free( conf->key_cert );
+#endif
+
+#if defined (MBEDTLS_SSL_DTLS_SRTP)
+    mbedtls_free( conf->dtls_srtp_profiles_list );
 #endif
 
     mbedtls_zeroize( conf, sizeof( mbedtls_ssl_config ) );

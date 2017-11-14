@@ -116,7 +116,7 @@ IoT_Error_t iot_tls_connect(Network *pNetwork, TLSConnectParams *params) {
     mbedtls_ssl_config_init(&(tlsDataParams->conf));
 
 #ifdef CONFIG_MBEDTLS_DEBUG
-    mbedtls_esp_enable_debug_log(&(tlsDataParams->conf), 4);
+    // mbedtls_esp_enable_debug_log(&(tlsDataParams->conf), 4);
 #endif
 
     mbedtls_ctr_drbg_init(&(tlsDataParams->ctr_drbg));

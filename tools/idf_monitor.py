@@ -292,6 +292,8 @@ class Monitor(object):
                 self.serial.write(codecs.encode(key))
             except serial.SerialException:
                 pass # this shouldn't happen, but sometimes port has closed in serial thread
+            except UnicodeEncodeError:
+                pass # this can happen if a non-ascii character was passed, ignoring
 
     def handle_serial_input(self, data):
         # this may need to be made more efficient, as it pushes out a byte
@@ -557,7 +559,12 @@ if os.name == 'nt':
                             self.output.write(self.matched) # not an ANSI color code, display verbatim
                         self.matched = b''
                 else:
-                    self.output.write(b)
+                    try:
+                        self.output.write(b)
+                    except IOError:
+                        # Windows 10 bug since the Fall Creators Update, sometimes writing to console randomly fails
+                        # (but always succeeds the second time, it seems.) Ref https://github.com/espressif/esp-idf/issues/1136
+                        self.output.write(b)
                     self.matched = b''
 
         def flush(self):

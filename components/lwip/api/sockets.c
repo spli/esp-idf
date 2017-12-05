@@ -1626,10 +1626,18 @@ lwip_select(int maxfdp1, fd_set *readset, fd_set *writeset, fd_set *exceptset,
   struct lwip_select_cb select_cb;
   int i;
   int maxfdp2;
+  struct timeval tv;
 #if LWIP_NETCONN_SEM_PER_THREAD
   int waited = 0;
 #endif
   SYS_ARCH_DECL_PROTECT(lev);
+
+  // NULL timeout blocks forever, this is never what we want
+  if (timeout == NULL) {
+    tv.tv_sec = 0;
+    tv.tv_usec = 1;
+    timeout = &tv;
+  }
 
   LWIP_DEBUGF(SOCKETS_DEBUG, ("lwip_select(%d, %p, %p, %p, tvsec=%"S32_F" tvusec=%"S32_F")\n",
                   maxfdp1, (void *)readset, (void *) writeset, (void *) exceptset,

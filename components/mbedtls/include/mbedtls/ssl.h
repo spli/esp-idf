@@ -790,6 +790,8 @@ struct mbedtls_ssl_config
     unsigned int cert_req_ca_list : 1;  /*!< enable sending CA list in
                                           Certificate Request messages?     */
 #endif
+
+    unsigned int max_content_len;
 };
 
 
@@ -948,6 +950,9 @@ struct mbedtls_ssl_context
     char own_verify_data[MBEDTLS_SSL_VERIFY_DATA_MAX_LEN]; /*!<  previous handshake verify data */
     char peer_verify_data[MBEDTLS_SSL_VERIFY_DATA_MAX_LEN]; /*!<  previous handshake verify data */
 #endif
+
+    unsigned int max_content_len;
+    unsigned int buffer_len;
 };
 
 #if defined(MBEDTLS_SSL_HW_RECORD_ACCEL)
@@ -2315,6 +2320,9 @@ void mbedtls_ssl_conf_renegotiation_enforced( mbedtls_ssl_config *conf, int max_
 void mbedtls_ssl_conf_renegotiation_period( mbedtls_ssl_config *conf,
                                    const unsigned char period[8] );
 #endif /* MBEDTLS_SSL_RENEGOTIATION */
+
+void mbedtls_ssl_conf_max_content_len( mbedtls_ssl_config *conf,
+                                    const unsigned int max_content_len);
 
 /**
  * \brief          Return the number of data bytes available to read

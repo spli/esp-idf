@@ -207,16 +207,22 @@
 #define MBEDTLS_SSL_DEFAULT_TICKET_LIFETIME     86400 /**< Lifetime of session tickets (if enabled) */
 #endif
 
+/**
+ * The default minimum allocation for fragment buffers.
+ * Making it larger trades off memory against the number of
+ * reallocations needed to make it big enough for cases where
+ * it needs to be bigger
+ */
+#if !defined(MBEDTLS_SSL_BUFFER_MIN)
+#define MBEDTLS_SSL_BUFFER_MIN 512
+#endif
 /*
  * Maxium fragment length in bytes,
  * determines the size of each of the two internal I/O buffers.
  *
- * Note: the RFC defines the default size of SSL / TLS messages. If you
- * change the value here, other clients / servers may not be able to
- * communicate with you anymore. Only change this value if you control
- * both sides of the connection and have it reduced at both sides, or
- * if you're using the Max Fragment Length extension and you know all your
- * peers are using it too!
+ * If you set this to less than 16384, mbedTLS will initially size the
+ * buffers to the value given, and if it finds something larger is
+ * necessary, it will reallocate the buffer.  This involves a memcpy.
  */
 #if !defined(MBEDTLS_SSL_MAX_CONTENT_LEN)
 #define MBEDTLS_SSL_MAX_CONTENT_LEN         16384   /**< Size of the input / output buffer */
@@ -379,14 +385,14 @@ union mbedtls_ssl_premaster_secret
 #endif
 #if defined(MBEDTLS_KEY_EXCHANGE_DHE_PSK_ENABLED)
     unsigned char _pms_dhe_psk[4 + MBEDTLS_MPI_MAX_SIZE
-                                 + MBEDTLS_PSK_MAX_LEN];       /* RFC 4279 3 */
+ MBEDTLS_PSK_MAX_LEN];       /* RFC 4279 3 */
 #endif
 #if defined(MBEDTLS_KEY_EXCHANGE_RSA_PSK_ENABLED)
     unsigned char _pms_rsa_psk[52 + MBEDTLS_PSK_MAX_LEN];      /* RFC 4279 4 */
 #endif
 #if defined(MBEDTLS_KEY_EXCHANGE_ECDHE_PSK_ENABLED)
     unsigned char _pms_ecdhe_psk[4 + MBEDTLS_ECP_MAX_BYTES
-                                   + MBEDTLS_PSK_MAX_LEN];     /* RFC 5489 2 */
+ MBEDTLS_PSK_MAX_LEN];     /* RFC 5489 2 */
 #endif
 #if defined(MBEDTLS_KEY_EXCHANGE_ECJPAKE_ENABLED)
     unsigned char _pms_ecjpake[32];     /* Thread spec: SHA-256 output */
@@ -540,6 +546,7 @@ typedef int mbedtls_ssl_get_timer_t( void * ctx );
 typedef struct mbedtls_ssl_session mbedtls_ssl_session;
 typedef struct mbedtls_ssl_context mbedtls_ssl_context;
 typedef struct mbedtls_ssl_config  mbedtls_ssl_config;
+typedef struct mbedtls_ssl_record  mbedtls_ssl_record;
 
 /* Defined in ssl_internal.h */
 typedef struct mbedtls_ssl_transform mbedtls_ssl_transform;
@@ -792,6 +799,27 @@ struct mbedtls_ssl_config
 #endif
 };
 
+struct mbedtls_ssl_record
+{
+    unsigned char *buf;      /*!< buffer                     */
+
+    /* pointers into buf */
+    unsigned char *ctr;      /*!< 64-bit incoming message counter
+                                     TLS: maintained by us
+                                     DTLS: read from peer             */
+    unsigned char *hdr;      /*!< start of record header           */
+    unsigned char *len;      /*!< two-bytes message length field   */
+    unsigned char *iv;       /*!< ivlen-byte IV                    */
+    unsigned char *msg;      /*!< message contents (in_iv+ivlen)   */
+
+    unsigned char *offt;     /*!< in only read offset in application data  */
+
+    int msgtype;             /*!< record header: message type      */
+    size_t msglen;           /*!< record header: message length    */
+    size_t left;             /*!< amount of data read so far       */
+    uint16_t max_content_len; /*!< allocated size of .buf, minus
+                                   MBEDTLS_SSL_BUFFER_OVERHEAD */
+};
 
 struct mbedtls_ssl_context
 {
@@ -852,19 +880,8 @@ struct mbedtls_ssl_context
     /*
      * Record layer (incoming data)
      */
-    unsigned char *in_buf;      /*!< input buffer                     */
-    unsigned char *in_ctr;      /*!< 64-bit incoming message counter
-                                     TLS: maintained by us
-                                     DTLS: read from peer             */
-    unsigned char *in_hdr;      /*!< start of record header           */
-    unsigned char *in_len;      /*!< two-bytes message length field   */
-    unsigned char *in_iv;       /*!< ivlen-byte IV                    */
-    unsigned char *in_msg;      /*!< message contents (in_iv+ivlen)   */
-    unsigned char *in_offt;     /*!< read offset in application data  */
+     mbedtls_ssl_record in;
 
-    int in_msgtype;             /*!< record header: message type      */
-    size_t in_msglen;           /*!< record header: message length    */
-    size_t in_left;             /*!< amount of data read so far       */
 #if defined(MBEDTLS_SSL_PROTO_DTLS)
     uint16_t in_epoch;          /*!< DTLS epoch for incoming records  */
     size_t next_record_offset;  /*!< offset of the next record in datagram
@@ -885,16 +902,7 @@ struct mbedtls_ssl_context
     /*
      * Record layer (outgoing data)
      */
-    unsigned char *out_buf;     /*!< output buffer                    */
-    unsigned char *out_ctr;     /*!< 64-bit outgoing message counter  */
-    unsigned char *out_hdr;     /*!< start of record header           */
-    unsigned char *out_len;     /*!< two-bytes message length field   */
-    unsigned char *out_iv;      /*!< ivlen-byte IV                    */
-    unsigned char *out_msg;     /*!< message contents (out_iv+ivlen)  */
-
-    int out_msgtype;            /*!< record header: message type      */
-    size_t out_msglen;          /*!< record header: message length    */
-    size_t out_left;            /*!< amount of data not yet written   */
+    mbedtls_ssl_record out;
 
 #if defined(MBEDTLS_ZLIB_SUPPORT)
     unsigned char *compress_buf;        /*!<  zlib data buffer        */

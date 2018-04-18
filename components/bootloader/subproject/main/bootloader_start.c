@@ -141,7 +141,7 @@ bool load_partition_table(bootloader_state_t* bs)
 {
     const esp_partition_info_t *partitions;
     const int ESP_PARTITION_TABLE_DATA_LEN = 0xC00; /* length of actual data (signature is appended to this) */
-    char *partition_usage;
+    const char *partition_usage;
     esp_err_t err;
     int num_partitions;
 
@@ -447,6 +447,14 @@ void bootloader_main()
 {
     vddsdio_configure();
     flash_gpio_configure();
+#if (CONFIG_ESP32_DEFAULT_CPU_FREQ_MHZ == 240)
+    //Check if ESP32 is rated for a CPU frequency of 160MHz only
+    if (REG_GET_BIT(EFUSE_BLK0_RDATA3_REG, EFUSE_RD_CHIP_CPU_FREQ_RATED) &&
+        REG_GET_BIT(EFUSE_BLK0_RDATA3_REG, EFUSE_RD_CHIP_CPU_FREQ_LOW)) {
+        ESP_LOGE(TAG, "Chip CPU frequency rated for 160MHz. Modify CPU frequency in menuconfig");
+        return;
+    }
+#endif
     bootloader_clock_configure();
     uart_console_configure();
     wdt_reset_check();
@@ -743,7 +751,7 @@ static void print_flash_info(const esp_image_header_t* phdr)
 
 static void vddsdio_configure()
 {
-#if CONFIG_BOOTLOADER_VDDSDIO_BOOST
+#if CONFIG_BOOTLOADER_VDDSDIO_BOOST_1_9V
     rtc_vddsdio_config_t cfg = rtc_vddsdio_get_config();
     if (cfg.enable == 1 && cfg.tieh == 0) {    // VDDSDIO regulator is enabled @ 1.8V
         cfg.drefh = 3;
@@ -892,7 +900,7 @@ static void wdt_reset_info_dump(int cpu)
 {
     uint32_t inst = 0, pid = 0, stat = 0, data = 0, pc = 0,
              lsstat = 0, lsaddr = 0, lsdata = 0, dstat = 0;
-    char *cpu_name = cpu ? "APP" : "PRO";
+    const char *cpu_name = cpu ? "APP" : "PRO";
 
     if (cpu == 0) {
         stat    = DPORT_REG_READ(DPORT_PRO_CPU_RECORD_STATUS_REG);

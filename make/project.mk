@@ -10,7 +10,7 @@
 # where this file is located.
 #
 
-.PHONY: build-components menuconfig defconfig all build clean all_binaries check-submodules size size-components size-files list-components
+.PHONY: build-components menuconfig defconfig all build clean all_binaries check-submodules size size-components size-files size-symbols list-components
 
 MAKECMDGOALS ?= all
 all: all_binaries
@@ -32,6 +32,7 @@ help:
 	@echo "make clean - Remove all build output"
 	@echo "make size - Display the static memory footprint of the app"
 	@echo "make size-components, size-files - Finer-grained memory footprints"
+	@echo "make size-symbols - Per symbol memory footprint. Requires COMPONENT=<component>"
 	@echo "make erase_flash - Erase entire flash contents"
 	@echo "make monitor - Run idf_monitor tool to monitor serial output from app"
 	@echo "make simple_monitor - Monitor serial output on terminal console"
@@ -227,7 +228,12 @@ endif
 	@echo $(ESPTOOLPY_WRITE_FLASH) $(ESPTOOL_ALL_FLASH_ARGS)
 
 
+# If we have `version.txt` then prefer that for extracting IDF version
+ifeq ("$(wildcard ${IDF_PATH}/version.txt)","")
 IDF_VER := $(shell cd ${IDF_PATH} && git describe --always --tags --dirty)
+else
+IDF_VER := `cat ${IDF_PATH}/version.txt`
+endif
 
 # Set default LDFLAGS
 EXTRA_LDFLAGS ?=
@@ -474,6 +480,13 @@ size-files: $(APP_ELF)
 size-components: $(APP_ELF)
 	$(PYTHON) $(IDF_PATH)/tools/idf_size.py --archives $(APP_MAP)
 
+size-symbols: $(APP_ELF)
+ifndef COMPONENT
+	$(error "ERROR: Please enter the component to look symbols for, e.g. COMPONENT=heap")
+else
+	$(PYTHON) $(IDF_PATH)/tools/idf_size.py --archive_details lib$(COMPONENT).a $(APP_MAP)
+endif
+
 # NB: this ordering is deliberate (app-clean & bootloader-clean before
 # _config-clean), so config remains valid during all component clean
 # targets
@@ -485,6 +498,8 @@ clean: app-clean bootloader-clean config-clean
 #
 # This only works for components inside IDF_PATH
 check-submodules:
+# Check if .gitmodules exists, otherwise skip submodule check, assuming flattened structure
+ifneq ("$(wildcard ${IDF_PATH}/.gitmodules)","")
 
 # Dump the git status for the whole working copy once, then grep it for each submodule. This saves a lot of time on Windows.
 GIT_STATUS := $(shell cd ${IDF_PATH} && git status --porcelain --ignore-submodules=dirty)
@@ -509,6 +524,7 @@ endef
 # filter/subst in expression ensures all submodule paths begin with $(IDF_PATH), and then strips that prefix
 # so the argument is suitable for use with 'git submodule' commands
 $(foreach submodule,$(subst $(IDF_PATH)/,,$(filter $(IDF_PATH)/%,$(COMPONENT_SUBMODULES))),$(eval $(call GenerateSubmoduleCheckTarget,$(submodule))))
+endif # End check for .gitmodules existence
 
 
 # PHONY target to list components in the build and their paths

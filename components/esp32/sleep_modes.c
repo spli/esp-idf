@@ -32,6 +32,7 @@
 #include "soc/spi_reg.h"
 #include "soc/sens_reg.h"
 #include "soc/dport_reg.h"
+#include "soc/rtc_wdt.h"
 #include "driver/rtc_io.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -102,11 +103,14 @@ esp_deep_sleep_wake_stub_fn_t esp_get_deep_sleep_wake_stub(void)
     REG_WRITE(RTC_MEMORY_CRC_REG, stored_crc);
     _lock_release(&lock_rtc_memory_crc);
 
-    if(stored_crc == calc_crc) {
-        return (esp_deep_sleep_wake_stub_fn_t)REG_READ(RTC_ENTRY_ADDR_REG);
-    } else {
+    if(stored_crc != calc_crc) {
         return NULL;
     }
+    esp_deep_sleep_wake_stub_fn_t stub_ptr = (esp_deep_sleep_wake_stub_fn_t) REG_READ(RTC_ENTRY_ADDR_REG);
+    if (!esp_ptr_executable(stub_ptr)) {
+        return NULL;
+    }
+    return stub_ptr;
 }
 
 void esp_set_deep_sleep_wake_stub(esp_deep_sleep_wake_stub_fn_t new_stub)
@@ -141,6 +145,13 @@ void esp_deep_sleep(uint64_t time_in_us)
     esp_deep_sleep_start();
 }
 
+static void IRAM_ATTR flush_uarts()
+{
+    for (int i = 0; i < 3; ++i) {
+        uart_tx_wait_idle(i);
+    }
+}
+
 static void IRAM_ATTR suspend_uarts()
 {
     for (int i = 0; i < 3; ++i) {
@@ -160,12 +171,19 @@ static void IRAM_ATTR resume_uarts()
 
 static uint32_t IRAM_ATTR esp_sleep_start(uint32_t pd_flags)
 {
-    // Stop UART output so that output is not lost due to APB frequency change
-    suspend_uarts();
+    // Stop UART output so that output is not lost due to APB frequency change.
+    // For light sleep, suspend UART output — it will resume after wakeup.
+    // For deep sleep, wait for the contents of UART FIFO to be sent.
+    if (pd_flags & RTC_SLEEP_PD_DIG) {
+        flush_uarts();
+    } else {
+        suspend_uarts();
+    }
 
     // Save current frequency and switch to XTAL
-    rtc_cpu_freq_t cpu_freq = rtc_clk_cpu_freq_get();
-    rtc_clk_cpu_freq_set(RTC_CPU_FREQ_XTAL);
+    rtc_cpu_freq_config_t cpu_freq_config;
+    rtc_clk_cpu_freq_get_config(&cpu_freq_config);
+    rtc_clk_cpu_freq_set_xtal();
 
     // Configure pins for external wakeup
     if (s_config.wakeup_triggers & RTC_EXT0_TRIG_EN) {
@@ -191,7 +209,7 @@ static uint32_t IRAM_ATTR esp_sleep_start(uint32_t pd_flags)
     uint32_t result = rtc_sleep_start(s_config.wakeup_triggers, 0);
 
     // Restore CPU frequency
-    rtc_clk_cpu_freq_set(cpu_freq);
+    rtc_clk_cpu_freq_set_config(&cpu_freq_config);
 
     // re-enable UART output
     resume_uarts();
@@ -203,7 +221,7 @@ void IRAM_ATTR esp_deep_sleep_start()
 {
     // record current RTC time
     s_config.rtc_ticks_at_sleep_start = rtc_time_get();
-
+    esp_sync_counters_rtc_and_frc();
     // Configure wake stub
     if (esp_get_deep_sleep_wake_stub() == NULL) {
         esp_set_deep_sleep_wake_stub(esp_wake_deep_sleep);
@@ -223,27 +241,6 @@ void IRAM_ATTR esp_deep_sleep_start()
     while (1) {
         ;
     }
-}
-
-static void rtc_wdt_enable(int time_ms)
-{
-    WRITE_PERI_REG(RTC_CNTL_WDTWPROTECT_REG, RTC_CNTL_WDT_WKEY_VALUE);
-    WRITE_PERI_REG(RTC_CNTL_WDTFEED_REG, 1);
-    REG_SET_FIELD(RTC_CNTL_WDTCONFIG0_REG, RTC_CNTL_WDT_SYS_RESET_LENGTH, 7);
-    REG_SET_FIELD(RTC_CNTL_WDTCONFIG0_REG, RTC_CNTL_WDT_CPU_RESET_LENGTH, 7);
-    REG_SET_FIELD(RTC_CNTL_WDTCONFIG0_REG, RTC_CNTL_WDT_STG0, RTC_WDT_STG_SEL_RESET_RTC);
-    WRITE_PERI_REG(RTC_CNTL_WDTCONFIG1_REG, rtc_clk_slow_freq_get_hz() * time_ms / 1000);
-    SET_PERI_REG_MASK(RTC_CNTL_WDTCONFIG0_REG, RTC_CNTL_WDT_EN | RTC_CNTL_WDT_PAUSE_IN_SLP);
-    WRITE_PERI_REG(RTC_CNTL_WDTWPROTECT_REG, 0);
-}
-
-static void rtc_wdt_disable()
-{
-    WRITE_PERI_REG(RTC_CNTL_WDTWPROTECT_REG, RTC_CNTL_WDT_WKEY_VALUE);
-    WRITE_PERI_REG(RTC_CNTL_WDTFEED_REG, 1);
-    REG_SET_FIELD(RTC_CNTL_WDTCONFIG0_REG, RTC_CNTL_WDT_STG0, RTC_WDT_STG_SEL_OFF);
-    REG_CLR_BIT(RTC_CNTL_WDTCONFIG0_REG, RTC_CNTL_WDT_EN);
-    WRITE_PERI_REG(RTC_CNTL_WDTWPROTECT_REG, 0);
 }
 
 /**
@@ -279,6 +276,11 @@ esp_err_t esp_light_sleep_start()
 {
     static portMUX_TYPE light_sleep_lock = portMUX_INITIALIZER_UNLOCKED;
     portENTER_CRITICAL(&light_sleep_lock);
+    /* We will be calling esp_timer_impl_advance inside DPORT access critical
+     * section. Make sure the code on the other CPU is not holding esp_timer
+     * lock, otherwise there will be deadlock.
+     */
+    esp_timer_impl_lock();
     s_config.rtc_ticks_at_sleep_start = rtc_time_get();
     uint64_t frc_time_at_start = esp_timer_get_time();
     DPORT_STALL_OTHER_CPU_START();
@@ -308,7 +310,17 @@ esp_err_t esp_light_sleep_start()
     rtc_vddsdio_config_t vddsdio_config = rtc_vddsdio_get_config();
 
     // Safety net: enable WDT in case exit from light sleep fails
-    rtc_wdt_enable(1000);
+    bool wdt_was_enabled = rtc_wdt_is_on(); // If WDT was enabled in the user code, then do not change it here.
+    if (!wdt_was_enabled) {
+        rtc_wdt_protect_off();
+        rtc_wdt_disable();
+        rtc_wdt_set_length_of_reset_signal(RTC_WDT_SYS_RESET_SIG, RTC_WDT_LENGTH_3_2us);
+        rtc_wdt_set_length_of_reset_signal(RTC_WDT_CPU_RESET_SIG, RTC_WDT_LENGTH_3_2us);
+        rtc_wdt_set_stage(RTC_WDT_STAGE0, RTC_WDT_STAGE_ACTION_RESET_RTC);
+        rtc_wdt_set_time(RTC_WDT_STAGE0, 1000);
+        rtc_wdt_enable();
+        rtc_wdt_protect_on();
+    }
 
     // Enter sleep, then wait for flash to be ready on wakeup
     esp_err_t err = esp_light_sleep_inner(pd_flags,
@@ -332,8 +344,11 @@ esp_err_t esp_light_sleep_start()
     }
     esp_set_time_from_rtc();
 
+    esp_timer_impl_unlock();
     DPORT_STALL_OTHER_CPU_END();
-    rtc_wdt_disable();
+    if (!wdt_was_enabled) {
+        rtc_wdt_disable();
+    }
     portEXIT_CRITICAL(&light_sleep_lock);
     return err;
 }
@@ -422,9 +437,10 @@ touch_pad_t esp_sleep_get_touchpad_wakeup_status()
     if (esp_sleep_get_wakeup_cause() != ESP_SLEEP_WAKEUP_TOUCHPAD) {
         return TOUCH_PAD_MAX;
     }
-    uint32_t touch_mask = REG_GET_FIELD(SENS_SAR_TOUCH_CTRL2_REG, SENS_TOUCH_MEAS_EN);
-    assert(touch_mask != 0 && "wakeup reason is RTC_TOUCH_TRIG_EN but SENS_TOUCH_MEAS_EN is zero");
-    return (touch_pad_t) (__builtin_ffs(touch_mask) - 1);
+    touch_pad_t pad_num;
+    esp_err_t ret = touch_pad_get_wakeup_status(&pad_num);
+    assert(ret == ESP_OK && "wakeup reason is RTC_TOUCH_TRIG_EN but SENS_TOUCH_MEAS_EN is zero");
+    return pad_num;
 }
 
 esp_err_t esp_sleep_enable_ext0_wakeup(gpio_num_t gpio_num, int level)
@@ -459,8 +475,7 @@ static void ext0_wakeup_prepare()
         if (desc->rtc_num == rtc_gpio_num) {
             REG_SET_BIT(desc->reg, desc->mux);
             SET_PERI_REG_BITS(desc->reg, 0x3, 0, desc->func);
-            REG_SET_BIT(desc->reg, desc->slpsel);
-            REG_SET_BIT(desc->reg, desc->slpie);
+            REG_SET_BIT(desc->reg, desc->ie);
             break;
         }
     }
@@ -502,16 +517,13 @@ static void ext1_wakeup_prepare()
         // Route pad to RTC
         REG_SET_BIT(desc->reg, desc->mux);
         SET_PERI_REG_BITS(desc->reg, 0x3, 0, desc->func);
+        // set input enable in sleep mode
+        REG_SET_BIT(desc->reg, desc->ie);
         // Pad configuration depends on RTC_PERIPH state in sleep mode
-        if (s_config.pd_options[ESP_PD_DOMAIN_RTC_PERIPH] == ESP_PD_OPTION_ON) {
-            // set input enable in sleep mode
-            REG_SET_BIT(desc->reg, desc->slpie);
-            // allow sleep status signal to control IE/SLPIE mux
-            REG_SET_BIT(desc->reg, desc->slpsel);
-        } else {
-            // RTC_PERIPH will be disabled, so need to enable input and
-            // lock pad configuration. Pullups/pulldowns also need to be disabled.
-            REG_SET_BIT(desc->reg, desc->ie);
+        if (s_config.pd_options[ESP_PD_DOMAIN_RTC_PERIPH] != ESP_PD_OPTION_ON) {
+            // RTC_PERIPH will be powered down, so RTC_IO_ registers will
+            // loose their state. Lock pad configuration.
+            // Pullups/pulldowns also need to be disabled.
             REG_CLR_BIT(desc->reg, desc->pulldown);
             REG_CLR_BIT(desc->reg, desc->pullup);
             REG_SET_BIT(RTC_CNTL_HOLD_FORCE_REG, desc->hold_force);
@@ -593,9 +605,9 @@ static uint32_t get_power_down_flags()
     // These labels are defined in the linker script:
     extern int _rtc_data_start, _rtc_data_end, _rtc_bss_start, _rtc_bss_end;
 
-    if (s_config.pd_options[ESP_PD_DOMAIN_RTC_SLOW_MEM] == ESP_PD_OPTION_AUTO ||
-            &_rtc_data_end > &_rtc_data_start ||
-            &_rtc_bss_end > &_rtc_bss_start) {
+    if ((s_config.pd_options[ESP_PD_DOMAIN_RTC_SLOW_MEM] == ESP_PD_OPTION_AUTO) &&
+            (&_rtc_data_end > &_rtc_data_start || &_rtc_bss_end > &_rtc_bss_start ||
+            (s_config.wakeup_triggers & RTC_ULP_TRIG_EN))) {
         s_config.pd_options[ESP_PD_DOMAIN_RTC_SLOW_MEM] = ESP_PD_OPTION_ON;
     }
 

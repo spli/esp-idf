@@ -22,7 +22,6 @@
  *
  ******************************************************************************/
 
-#include <arpa/inet.h>
 #include <pthread.h>
 #include <stdlib.h>
 
@@ -951,8 +950,16 @@ static bool create_base_record(const uint32_t sdp_handle, const char *name, cons
         proto_list[2].num_params = 0;
     }
 
-    char *stage = "protocol_list";
+    const char *stage = "protocol_list";
     if (!SDP_AddProtocolList(sdp_handle, num_proto_elements, proto_list)){
+        APPL_TRACE_ERROR("create_base_record: failed to create base service "
+                   "record, stage: %s, scn: %d, name: %s, with_obex: %d",
+                   stage, channel, name, with_obex);
+        return FALSE;
+    }
+
+    stage = "profile_descriptor_list";
+    if (!SDP_AddProfileDescriptorList(sdp_handle, UUID_SERVCLASS_SERIAL_PORT, SPP_VERSION)){
         APPL_TRACE_ERROR("create_base_record: failed to create base service "
                    "record, stage: %s, scn: %d, name: %s, with_obex: %d",
                    stage, channel, name, with_obex);
@@ -1000,7 +1007,7 @@ static int add_spp_sdp(const char *name, const int channel) {
     }
 
     // Create the base SDP record.
-    char *stage = "create_base_record";
+    const char *stage = "create_base_record";
     if (!create_base_record(handle, name, channel, FALSE /* with_obex */)){
         SDP_DeleteRecord(handle);
         APPL_TRACE_ERROR("add_spp_sdp: failed to register SPP service, "

@@ -68,6 +68,7 @@ extern "C" {
 #define RTC_XTAL_FREQ_REG       RTC_CNTL_STORE4_REG
 #define RTC_APB_FREQ_REG        RTC_CNTL_STORE5_REG
 #define RTC_ENTRY_ADDR_REG      RTC_CNTL_STORE6_REG
+#define RTC_RESET_CAUSE_REG     RTC_CNTL_STORE6_REG
 #define RTC_MEMORY_CRC_REG      RTC_CNTL_STORE7_REG
 
 
@@ -192,7 +193,7 @@ void set_rtc_memory_crc(void);
   *
   * @return None
   */
-void software_reset(void);
+void __attribute__((noreturn)) software_reset(void);
 
 /**
   * @brief Software Reset digital core.

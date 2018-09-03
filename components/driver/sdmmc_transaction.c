@@ -19,8 +19,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
-#include "soc/sdmmc_reg.h"
-#include "soc/sdmmc_struct.h"
+#include "freertos/task.h"
+#include "soc/sdmmc_periph.h"
 #include "soc/soc_memory_layout.h"
 #include "driver/sdmmc_types.h"
 #include "driver/sdmmc_defs.h"
@@ -74,11 +74,14 @@ static esp_pm_lock_handle_t s_pm_lock;
 
 static esp_err_t handle_idle_state_events();
 static sdmmc_hw_cmd_t make_hw_cmd(sdmmc_command_t* cmd);
-static esp_err_t handle_event(sdmmc_command_t* cmd, sdmmc_req_state_t* pstate);
-static esp_err_t process_events(sdmmc_event_t evt, sdmmc_command_t* cmd, sdmmc_req_state_t* pstate);
+static esp_err_t handle_event(sdmmc_command_t* cmd, sdmmc_req_state_t* state,
+        sdmmc_event_t* unhandled_events);
+static esp_err_t process_events(sdmmc_event_t evt, sdmmc_command_t* cmd,
+        sdmmc_req_state_t* pstate, sdmmc_event_t* unhandled_events);
 static void process_command_response(uint32_t status, sdmmc_command_t* cmd);
 static void fill_dma_descriptors(size_t num_desc);
 static size_t get_free_descriptors_count();
+static bool wait_for_busy_cleared(int timeout_ms);
 
 esp_err_t sdmmc_host_transaction_handler_init()
 {
@@ -122,9 +125,10 @@ esp_err_t sdmmc_host_do_transaction(int slot, sdmmc_command_t* cmdinfo)
     // convert cmdinfo to hardware register value
     sdmmc_hw_cmd_t hw_cmd = make_hw_cmd(cmdinfo);
     if (cmdinfo->data) {
-        if (cmdinfo->datalen < 4 || cmdinfo->blklen % 4 != 0) {
-            ESP_LOGD(TAG, "%s: invalid size: total=%d block=%d",
-                    __func__, cmdinfo->datalen, cmdinfo->blklen);
+        // Length should be either <4 or >=4 and =0 (mod 4).
+        if (cmdinfo->datalen >= 4 && cmdinfo->datalen % 4 != 0) {
+            ESP_LOGD(TAG, "%s: invalid size: total=%d",
+                    __func__, cmdinfo->datalen);
             ret = ESP_ERR_INVALID_SIZE;
             goto out;
         }
@@ -156,10 +160,16 @@ esp_err_t sdmmc_host_do_transaction(int slot, sdmmc_command_t* cmdinfo)
     // process events until transfer is complete
     cmdinfo->error = ESP_OK;
     sdmmc_req_state_t state = SDMMC_SENDING_CMD;
+    sdmmc_event_t unhandled_events = { 0 };
     while (state != SDMMC_IDLE) {
-        ret = handle_event(cmdinfo, &state);
+        ret = handle_event(cmdinfo, &state, &unhandled_events);
         if (ret != ESP_OK) {
             break;
+        }
+    }
+    if (ret == ESP_OK && (cmdinfo->flags & SCF_WAIT_BUSY)) {
+        if (!wait_for_busy_cleared(cmdinfo->timeout_ms)) {
+            ret = ESP_ERR_TIMEOUT;
         }
     }
     s_is_app_cmd = (ret == ESP_OK && cmdinfo->opcode == MMC_APP_CMD);
@@ -212,7 +222,8 @@ static void fill_dma_descriptors(size_t num_desc)
         desc->owned_by_idmac = 1;
         desc->buffer1_ptr = s_cur_transfer.ptr;
         desc->next_desc_ptr = (last) ? NULL : &s_dma_desc[(next + 1) % SDMMC_DMA_DESC_CNT];
-        desc->buffer1_size = size_to_fill;
+        assert(size_to_fill < 4 || size_to_fill % 4 == 0);
+        desc->buffer1_size = (size_to_fill + 3) & (~3);
 
         s_cur_transfer.size_remaining -= size_to_fill;
         s_cur_transfer.ptr += size_to_fill;
@@ -245,10 +256,11 @@ static esp_err_t handle_idle_state_events()
 }
 
 
-static esp_err_t handle_event(sdmmc_command_t* cmd, sdmmc_req_state_t* state)
+static esp_err_t handle_event(sdmmc_command_t* cmd, sdmmc_req_state_t* state,
+        sdmmc_event_t* unhandled_events)
 {
-    sdmmc_event_t evt;
-    esp_err_t err = sdmmc_host_wait_for_event(cmd->timeout_ms / portTICK_PERIOD_MS, &evt);
+    sdmmc_event_t event;
+    esp_err_t err = sdmmc_host_wait_for_event(cmd->timeout_ms / portTICK_PERIOD_MS, &event);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "sdmmc_host_wait_for_event returned 0x%x", err);
         if (err == ESP_ERR_TIMEOUT) {
@@ -256,9 +268,24 @@ static esp_err_t handle_event(sdmmc_command_t* cmd, sdmmc_req_state_t* state)
         }
         return err;
     }
-    ESP_LOGV(TAG, "sdmmc_handle_event: evt %08x %08x", evt.sdmmc_status, evt.dma_status);
-    process_events(evt, cmd, state);
+    ESP_LOGV(TAG, "sdmmc_handle_event: event %08x %08x, unhandled %08x %08x",
+            event.sdmmc_status, event.dma_status,
+            unhandled_events->sdmmc_status, unhandled_events->dma_status);
+    event.sdmmc_status |= unhandled_events->sdmmc_status;
+    event.dma_status |= unhandled_events->dma_status;
+    process_events(event, cmd, state, unhandled_events);
+    ESP_LOGV(TAG, "sdmmc_handle_event: events unhandled: %08x %08x", unhandled_events->sdmmc_status, unhandled_events->dma_status);
     return ESP_OK;
+}
+
+static bool cmd_needs_auto_stop(const sdmmc_command_t* cmd)
+{
+    /* SDMMC host needs an "auto stop" flag for the following commands: */
+    return cmd->datalen > 0 &&
+           (cmd->opcode == MMC_WRITE_BLOCK_MULTIPLE ||
+            cmd->opcode == MMC_READ_BLOCK_MULTIPLE ||
+            cmd->opcode == MMC_WRITE_DAT_UNTIL_STOP ||
+            cmd->opcode == MMC_READ_DAT_UNTIL_STOP);
 }
 
 static sdmmc_hw_cmd_t make_hw_cmd(sdmmc_command_t* cmd)
@@ -292,12 +319,11 @@ static sdmmc_hw_cmd_t make_hw_cmd(sdmmc_command_t* cmd)
             res.rw = 1;
         }
         assert(cmd->datalen % cmd->blklen == 0);
-        if ((cmd->datalen / cmd->blklen) > 1) {
-            res.send_auto_stop = 1;
-        }
+        res.send_auto_stop = cmd_needs_auto_stop(cmd) ? 1 : 0;
     }
-    ESP_LOGV(TAG, "%s: opcode=%d, rexp=%d, crc=%d", __func__,
-            res.cmd_index, res.response_expect, res.check_response_crc);
+    ESP_LOGV(TAG, "%s: opcode=%d, rexp=%d, crc=%d, auto_stop=%d", __func__,
+            res.cmd_index, res.response_expect, res.check_response_crc,
+            res.send_auto_stop);
     return res;
 }
 
@@ -363,7 +389,8 @@ static inline bool mask_check_and_clear(uint32_t* state, uint32_t mask) {
     return ret;
 }
 
-static esp_err_t process_events(sdmmc_event_t evt, sdmmc_command_t* cmd, sdmmc_req_state_t* pstate)
+static esp_err_t process_events(sdmmc_event_t evt, sdmmc_command_t* cmd,
+        sdmmc_req_state_t* pstate, sdmmc_event_t* unhandled_events)
 {
     const char* const s_state_names[] __attribute__((unused)) = {
         "IDLE",
@@ -372,7 +399,8 @@ static esp_err_t process_events(sdmmc_event_t evt, sdmmc_command_t* cmd, sdmmc_r
         "BUSY"
     };
     sdmmc_event_t orig_evt = evt;
-    ESP_LOGV(TAG, "%s: state=%s", __func__, s_state_names[*pstate]);
+    ESP_LOGV(TAG, "%s: state=%s evt=%x dma=%x", __func__, s_state_names[*pstate],
+            evt.sdmmc_status, evt.dma_status);
     sdmmc_req_state_t next_state = *pstate;
     sdmmc_req_state_t state = (sdmmc_req_state_t) -1;
     while (next_state != state) {
@@ -386,12 +414,19 @@ static esp_err_t process_events(sdmmc_event_t evt, sdmmc_command_t* cmd, sdmmc_r
                     process_command_response(orig_evt.sdmmc_status, cmd);
                     break;      // Need to wait for the CMD_DONE interrupt
                 }
-                process_command_response(orig_evt.sdmmc_status, cmd);
-                if (cmd->error != ESP_OK || cmd->data == NULL) {
-                    next_state = SDMMC_IDLE;
-                    break;
+                if (mask_check_and_clear(&evt.sdmmc_status, SDMMC_INTMASK_CMD_DONE)) {
+                    process_command_response(orig_evt.sdmmc_status, cmd);
+                    if (cmd->error != ESP_OK) {
+                        next_state = SDMMC_IDLE;
+                        break;
+                    }
+
+                    if (cmd->data == NULL) {
+                        next_state = SDMMC_IDLE;
+                    } else {
+                        next_state = SDMMC_SENDING_DATA;
+                    }
                 }
-                next_state = SDMMC_SENDING_DATA;
                 break;
 
 
@@ -429,8 +464,27 @@ static esp_err_t process_events(sdmmc_event_t evt, sdmmc_command_t* cmd, sdmmc_r
         ESP_LOGV(TAG, "%s state=%s next_state=%s", __func__, s_state_names[state], s_state_names[next_state]);
     }
     *pstate = state;
+    *unhandled_events = evt;
     return ESP_OK;
 }
 
+static bool wait_for_busy_cleared(int timeout_ms)
+{
+    if (timeout_ms == 0) {
+        return !sdmmc_host_card_busy();
+    }
 
+    /* It would have been nice to do this without polling, however the peripheral
+     * can only generate Busy Clear Interrupt for data write commands, and waiting
+     * for busy clear is mostly needed for other commands such as MMC_SWITCH.
+     */
+    int timeout_ticks = (timeout_ms + portTICK_PERIOD_MS - 1) / portTICK_PERIOD_MS;
+    while (timeout_ticks-- > 0) {
+        if (!sdmmc_host_card_busy()) {
+            return true;
+        }
+        vTaskDelay(1);
+    }
+    return false;
+}
 

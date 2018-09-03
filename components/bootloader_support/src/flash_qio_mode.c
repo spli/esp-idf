@@ -35,6 +35,7 @@
 #define CMD_WRDI       0x04
 #define CMD_RDSR       0x05
 #define CMD_RDSR2      0x35 /* Not all SPI flash uses this command */
+#define CMD_OTPEN      0x3A /* Enable OTP mode, not all SPI flash uses this command */
 
 static const char *TAG = "qio_mode";
 
@@ -65,6 +66,11 @@ static void write_status_8b_wrsr2(unsigned new_status);
 /* Write 16 bit status using WRSR */
 static void write_status_16b_wrsr(unsigned new_status);
 
+/* Read 8 bit status of XM25QU64A  */
+static unsigned read_status_8b_xmc25qu64a();
+/* Write 8 bit status of XM25QU64A */
+static void write_status_8b_xmc25qu64a(unsigned new_status);
+
 #define ESP32_D2WD_WP_GPIO 7 /* ESP32-D2WD has this GPIO wired to WP pin of flash */
 
 #ifndef CONFIG_BOOTLOADER_SPI_WP_PIN // Set in menuconfig if SPI flasher config is set to a quad mode
@@ -84,11 +90,12 @@ static void write_status_16b_wrsr(unsigned new_status);
    Searching of this table stops when the first match is found.
  */
 const static qio_info_t chip_data[] = {
-/*   Manufacturer,   mfg_id, flash_id, id mask, Read Status,                Write Status,          QIE Bit */
-    { "MXIC",        0xC2,   0x2000, 0xFF00,    read_status_8b_rdsr,        write_status_8b_wrsr,  6 },
-    { "ISSI",        0x9D,   0x4000, 0xCF00,    read_status_8b_rdsr,        write_status_8b_wrsr,  6 }, /* IDs 0x40xx, 0x70xx */
-    { "WinBond",     0xEF,   0x4000, 0xFF00,    read_status_16b_rdsr_rdsr2, write_status_16b_wrsr, 9 },
-    { "GD",          0xC8,   0x6000, 0xFF00,    read_status_16b_rdsr_rdsr2, write_status_16b_wrsr, 9 },
+/*   Manufacturer,   mfg_id, flash_id, id mask, Read Status,                Write Status,               QIE Bit */
+    { "MXIC",        0xC2,   0x2000, 0xFF00,    read_status_8b_rdsr,        write_status_8b_wrsr,       6 },
+    { "ISSI",        0x9D,   0x4000, 0xCF00,    read_status_8b_rdsr,        write_status_8b_wrsr,       6 }, /* IDs 0x40xx, 0x70xx */
+    { "WinBond",     0xEF,   0x4000, 0xFF00,    read_status_16b_rdsr_rdsr2, write_status_16b_wrsr,      9 },
+    { "GD",          0xC8,   0x6000, 0xFF00,    read_status_16b_rdsr_rdsr2, write_status_16b_wrsr,      9 },
+    { "XM25QU64A",   0x20,   0x3817, 0xFFFF,    read_status_8b_xmc25qu64a,  write_status_8b_xmc25qu64a, 6 },
 
     /* Final entry is default entry, if no other IDs have matched.
 
@@ -96,7 +103,7 @@ const static qio_info_t chip_data[] = {
        GigaDevice (mfg ID 0xC8, flash IDs including 4016),
        FM25Q32 (QOUT mode only, mfg ID 0xA1, flash IDs including 4016)
     */
-    { NULL,          0xFF,    0xFFFF, 0xFFFF,   read_status_8b_rdsr2,       write_status_8b_wrsr2, 1 },
+    { NULL,          0xFF,    0xFFFF, 0xFFFF,   read_status_8b_rdsr2,       write_status_8b_wrsr2,      1 },
 };
 
 #define NUM_CHIPS (sizeof(chip_data) / sizeof(qio_info_t))
@@ -116,21 +123,13 @@ static uint32_t execute_flash_command(uint8_t command, uint32_t mosi_data, uint8
 extern uint8_t g_rom_spiflash_dummy_len_plus[];
 uint32_t bootloader_read_flash_id()
 {
-    uint32_t old_ctrl_reg = SPIFLASH.ctrl.val;
-    SPIFLASH.ctrl.val = SPI_WP_REG; // keep WP high while idle, otherwise leave DIO mode
-    SPIFLASH.user.usr_dummy = 0;
-    SPIFLASH.user.usr_addr = 0;
-    SPIFLASH.user.usr_command = 1;
-    SPIFLASH.user2.usr_command_bitlen = 7;
     uint32_t id = execute_flash_command(CMD_RDID, 0, 0, 24);
-    SPIFLASH.ctrl.val = old_ctrl_reg;
     id = ((id & 0xff) << 16) | ((id >> 16) & 0xff) | (id & 0xff00);
     return id;
 }
 
 void bootloader_enable_qio_mode(void)
 {
-    uint32_t old_ctrl_reg;
     uint32_t raw_flash_id;
     uint8_t mfg_id;
     uint16_t flash_id;
@@ -138,10 +137,6 @@ void bootloader_enable_qio_mode(void)
 
     ESP_LOGD(TAG, "Probing for QIO mode enable...");
     esp_rom_spiflash_wait_idle(&g_rom_flashchip);
-
-    /* Set up some of the SPIFLASH user/ctrl variables which don't change
-       while we're probing using execute_flash_command() */
-    old_ctrl_reg = SPIFLASH.ctrl.val;
 
     raw_flash_id = g_rom_flashchip.device_id;
     ESP_LOGD(TAG, "Raw SPI flash chip id 0x%x", raw_flash_id);
@@ -162,13 +157,9 @@ void bootloader_enable_qio_mode(void)
         ESP_LOGI(TAG, "Enabling default flash chip QIO");
     }
 
-    esp_err_t res = enable_qio_mode(chip_data[i].read_status_fn,
-                                    chip_data[i].write_status_fn,
-                                    chip_data[i].status_qio_bit);
-    if (res != ESP_OK) {
-        // Restore SPI flash CTRL setting, to keep us in DIO/DOUT mode
-        SPIFLASH.ctrl.val = old_ctrl_reg;
-    }
+    enable_qio_mode(chip_data[i].read_status_fn,
+                    chip_data[i].write_status_fn,
+                    chip_data[i].status_qio_bit);
 }
 
 static esp_err_t enable_qio_mode(read_status_fn_t read_status_fn,
@@ -262,8 +253,33 @@ static void write_status_16b_wrsr(unsigned new_status)
     execute_flash_command(CMD_WRSR, new_status, 16, 0);
 }
 
+static unsigned read_status_8b_xmc25qu64a()
+{
+    execute_flash_command(CMD_OTPEN, 0, 0, 0);  /* Enter OTP mode */
+    esp_rom_spiflash_wait_idle(&g_rom_flashchip);
+    uint32_t read_status = execute_flash_command(CMD_RDSR, 0, 0, 8);
+    execute_flash_command(CMD_WRDI, 0, 0, 0);   /* Exit OTP mode */
+    return read_status;
+}
+
+static void write_status_8b_xmc25qu64a(unsigned new_status)
+{
+    execute_flash_command(CMD_OTPEN, 0, 0, 0);  /* Enter OTP mode */
+    esp_rom_spiflash_wait_idle(&g_rom_flashchip);
+    execute_flash_command(CMD_WRSR, new_status, 8, 0);
+    esp_rom_spiflash_wait_idle(&g_rom_flashchip);
+    execute_flash_command(CMD_WRDI, 0, 0, 0);   /* Exit OTP mode */
+}
+
 static uint32_t execute_flash_command(uint8_t command, uint32_t mosi_data, uint8_t mosi_len, uint8_t miso_len)
 {
+    uint32_t old_ctrl_reg = SPIFLASH.ctrl.val;
+    SPIFLASH.ctrl.val = SPI_WP_REG_M; // keep WP high while idle, otherwise leave DIO mode
+    SPIFLASH.user.usr_dummy = 0;
+    SPIFLASH.user.usr_addr = 0;
+    SPIFLASH.user.usr_command = 1;
+    SPIFLASH.user2.usr_command_bitlen = 7;
+
     SPIFLASH.user2.usr_command_value = command;
     SPIFLASH.user.usr_miso = miso_len > 0;
     SPIFLASH.miso_dlen.usr_miso_dbitlen = miso_len ? (miso_len - 1) : 0;
@@ -286,5 +302,6 @@ static uint32_t execute_flash_command(uint8_t command, uint32_t mosi_data, uint8
     while(SPIFLASH.cmd.usr != 0)
     { }
 
+    SPIFLASH.ctrl.val = old_ctrl_reg;
     return SPIFLASH.data_buf[0];
 }

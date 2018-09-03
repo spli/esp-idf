@@ -29,6 +29,7 @@
 #include "soc/io_mux_reg.h"
 #include "soc/rtc_cntl_reg.h"
 #include "soc/timer_group_reg.h"
+#include "soc/rtc_wdt.h"
 
 #include "driver/rtc_io.h"
 
@@ -61,6 +62,7 @@
 #include "esp_panic.h"
 #include "esp_core_dump.h"
 #include "esp_app_trace.h"
+#include "esp_dbg_stubs.h"
 #include "esp_efuse.h"
 #include "esp_spiram.h"
 #include "esp_clk_internal.h"
@@ -135,7 +137,7 @@ void IRAM_ATTR call_start_cpu0()
         || rst_reas[1] == RTCWDT_SYS_RESET || rst_reas[1] == TG0WDT_SYS_RESET
 #endif
     ) {
-        esp_panic_wdt_stop();
+        rtc_wdt_disable();
     }
 
     //Clear BSS. Please do not attempt to do any complex stuff (like early logging) before this.
@@ -268,13 +270,6 @@ void start_cpu0_default(void)
             ESP_EARLY_LOGE(TAG, "External RAM could not be added to heap!");
             abort();
         }
-#if CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL
-        r=esp_spiram_reserve_dma_pool(CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL);
-        if (r != ESP_OK) {
-            ESP_EARLY_LOGE(TAG, "Could not reserve internal/DMA pool!");
-            abort();
-        }
-#endif
 #if CONFIG_SPIRAM_USE_MALLOC
         heap_caps_malloc_extmem_enable(CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL);
 #endif
@@ -332,6 +327,9 @@ void start_cpu0_default(void)
 #endif
 #if CONFIG_SYSVIEW_ENABLE
     SEGGER_SYSVIEW_Conf();
+#endif
+#if CONFIG_ESP32_DEBUG_STUBS_ENABLE
+    esp_dbg_stubs_init();
 #endif
     err = esp_pthread_init();
     assert(err == ESP_OK && "Failed to init pthread module!");
@@ -431,7 +429,7 @@ static void main_task(void* args)
 {
     // Now that the application is about to start, disable boot watchdogs
     REG_CLR_BIT(TIMG_WDTCONFIG0_REG(0), TIMG_WDT_FLASHBOOT_MOD_EN_S);
-    REG_CLR_BIT(RTC_CNTL_WDTCONFIG0_REG, RTC_CNTL_WDT_FLASHBOOT_MOD_EN);
+    rtc_wdt_disable();
 #if !CONFIG_FREERTOS_UNICORE
     // Wait for FreeRTOS initialization to finish on APP CPU, before replacing its startup stack
     while (port_xSchedulerRunning[1] == 0) {
@@ -440,6 +438,15 @@ static void main_task(void* args)
 #endif
     //Enable allocation in region where the startup stacks were located.
     heap_caps_enable_nonos_stack_heaps();
+
+    // Now we have startup stack RAM available for heap, enable any DMA pool memory
+#if CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL
+    esp_err_t r = esp_spiram_reserve_dma_pool(CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL);
+    if (r != ESP_OK) {
+        ESP_EARLY_LOGE(TAG, "Could not reserve internal/DMA pool (error 0x%x)", r);
+        abort();
+    }
+#endif
 
     //Initialize task wdt if configured to do so
 #ifdef CONFIG_TASK_WDT_PANIC

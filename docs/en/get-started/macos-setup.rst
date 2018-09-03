@@ -1,6 +1,7 @@
 **************************************
 Standard Setup of Toolchain for Mac OS
 **************************************
+:link_to_translation:`zh_CN:[中文]`
 
 Install Prerequisites
 =====================
@@ -9,10 +10,9 @@ Install Prerequisites
 
     sudo easy_install pip
 
-- install pyserial::
+.. note::
 
-    sudo pip install pyserial
-
+    ``pip`` will be used later for installing :ref:`the required Python packages <get-started-get-packages>`.
 
 Toolchain Setup
 ===============

@@ -304,6 +304,7 @@ test cases:
   initial condition: BLE_CONN3
   cmd set:
   - ""
+  - *primary_service_discovery
   - - "SSC SSC2 gatts -V -c 0xC300 -p 0xA2 -z set -v 0x02"
     - ["R SSC2 C +GATTS:SetAttrVal,OK"]
   - - "SSC SSC1 gattc -R -z char -s 0xA002 -c 0xC300 -p 0x10"
@@ -499,6 +500,7 @@ test cases:
   initial condition: BLE_CONN3
   cmd set:
   - ""
+  - *primary_service_discovery
   - - "SSC SSC2 gatts -V -c 0xC300 -d 0x2901 -p 0xA2 -z set -v 0x02"
     - ["R SSC2 C +GATTS:SetAttrVal,OK"]
   - - "SSC SSC1 gattc -R -z descriptor -s 0xA002 -c 0xC300 -d 0x2901 -p 0x10"
@@ -1545,7 +1547,7 @@ test cases:
   cmd set:
   - ""
   - *primary_service_discovery
-  - - "SSC SSC1 gattc -W -z char -s 0xA000 -c 0xC102 -p 0x10 -v -x01 -w 1"
+  - - "SSC SSC1 gattc -W -z char -s 0xA000 -c 0xC102 -p 0x10 -v 0x01 -w 1"
     - ["P SSC1 C +GATTC:WriteOnce"]
 - ID: BTSTK_GATT_25008
   <<: *GATT_CASE
@@ -1683,9 +1685,9 @@ test cases:
   cmd set:
   - ""
   - *primary_service_discovery
-  - - "SSC SSC1 gattc -W -z char -s 0xA002 -c 0xC302 -p 0x10 -v -x01 -w 1"
+  - - "SSC SSC1 gattc -W -z char -s 0xA002 -c 0xC302 -p 0x10 -v 0x01 -w 1"
     - ["R SSC1 C +GATTC:Write,OK"]
-  - - "SSC SSC1 gattc -W -z char -s 0xA002 -c 0xC302 -p 0x10 -v -x01 -w 1"
+  - - "SSC SSC1 gattc -W -z char -s 0xA002 -c 0xC302 -p 0x10 -v 0x01 -w 1"
     - ["R SSC1 C +GATTC:Write,OK"]
 - ID: BTSTK_GATT_25015
   <<: *GATT_CASE

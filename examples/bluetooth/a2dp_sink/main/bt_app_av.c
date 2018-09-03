@@ -53,7 +53,8 @@ void bt_app_a2d_cb(esp_a2d_cb_event_t event, esp_a2d_cb_param_t *param)
 
 void bt_app_a2d_data_cb(const uint8_t *data, uint32_t len)
 {
-    i2s_write_bytes(0, (const char *)data, len, portMAX_DELAY);
+    size_t bytes_written;
+    i2s_write(0, data, len, &bytes_written, portMAX_DELAY);
     if (++m_pkt_cnt % 100 == 0) {
         ESP_LOGI(BT_AV_TAG, "Audio packet count %u", m_pkt_cnt);
     }
@@ -74,6 +75,7 @@ void bt_app_rc_ct_cb(esp_avrc_ct_cb_event_t event, esp_avrc_ct_cb_param_t *param
     switch (event) {
     case ESP_AVRC_CT_METADATA_RSP_EVT:
         bt_app_alloc_meta_buffer(param);
+        /* fall through */
     case ESP_AVRC_CT_CONNECTION_STATE_EVT:
     case ESP_AVRC_CT_PASSTHROUGH_RSP_EVT:
     case ESP_AVRC_CT_CHANGE_NOTIFY_EVT:
@@ -97,6 +99,11 @@ static void bt_av_hdl_a2d_evt(uint16_t event, void *p_param)
         uint8_t *bda = a2d->conn_stat.remote_bda;
         ESP_LOGI(BT_AV_TAG, "A2DP connection state: %s, [%02x:%02x:%02x:%02x:%02x:%02x]",
              m_a2d_conn_state_str[a2d->conn_stat.state], bda[0], bda[1], bda[2], bda[3], bda[4], bda[5]);
+        if (a2d->conn_stat.state == ESP_A2D_CONNECTION_STATE_DISCONNECTED) {
+            esp_bt_gap_set_scan_mode(ESP_BT_SCAN_MODE_CONNECTABLE_DISCOVERABLE);
+        } else if (a2d->conn_stat.state == ESP_A2D_CONNECTION_STATE_CONNECTED){
+            esp_bt_gap_set_scan_mode(ESP_BT_SCAN_MODE_NONE);
+        }
         break;
     }
     case ESP_A2D_AUDIO_STATE_EVT: {

@@ -44,6 +44,16 @@ tBTE_APPL_CFG bte_appl_cfg = {
 };
 #endif
 
+#if (defined CLASSIC_BT_INCLUDED && CLASSIC_BT_INCLUDED == TRUE && BT_SSP_INCLUDED == TRUE)
+#include "common/bte_appl.h"
+#include "btm_int.h"
+tBTE_BT_APPL_CFG bte_bt_appl_cfg = {
+  0,                    //Todo, Authentication requirements
+  BTM_LOCAL_IO_CAPS,
+  NULL,                 //Todo, OOB data
+};
+#endif
+
 /*******************************************************************************
 **
 ** Function         bta_dm_co_get_compress_memory
@@ -63,6 +73,34 @@ BOOLEAN bta_dm_co_get_compress_memory(tBTA_SYS_ID id, UINT8 **memory_p, UINT32 *
     UNUSED(memory_p);
     UNUSED(memory_size);
     return TRUE;
+}
+
+/*******************************************************************************
+**
+** Function         bta_dm_co_bt_set_io_cap
+**
+** Description      This function is used to set IO capabilities
+**
+** Parameters       bt_io_cap  - IO capabilities
+**
+** @return          - ESP_BT_STATUS_SUCCESS : success
+**                  - other  : failed
+**
+*******************************************************************************/
+esp_err_t bta_dm_co_bt_set_io_cap(UINT8 bt_io_cap)
+{
+    esp_err_t ret = ESP_BT_STATUS_SUCCESS;
+#if (BT_SSP_INCLUDED == TRUE)
+    if(bt_io_cap < BTM_IO_CAP_MAX ) {
+        bte_bt_appl_cfg.bt_io_cap = bt_io_cap;
+        btm_cb.devcb.loc_io_caps = bt_io_cap;
+        ret = ESP_BT_STATUS_SUCCESS;
+    } else {
+        ret = ESP_BT_STATUS_FAIL;
+        APPL_TRACE_ERROR("%s error:Invalid io cap value.",__func__);
+    }
+#endif  ///BT_SSP_INCLUDED == TRUE
+    return ret;
 }
 
 /*******************************************************************************
@@ -204,149 +242,6 @@ void bta_dm_co_rmt_oob(BD_ADDR bd_addr)
 
 
 // REMOVE FOR BLUEDROID ?
-
-#if (BTM_SCO_HCI_INCLUDED == TRUE ) && (BTM_SCO_INCLUDED == TRUE)
-#if (defined(BTIF_INCLUDED) && BTIF_INCLUDED == TRUE)
-/*******************************************************************************
-**
-** Function         btui_sco_codec_callback
-**
-** Description      Callback for btui codec.
-**
-**
-** Returns          void
-**
-*******************************************************************************/
-static void btui_sco_codec_callback(UINT16 event, UINT16 sco_handle)
-{
-    bta_dm_sco_ci_data_ready(event, sco_handle);
-}
-/*******************************************************************************
-**
-** Function         bta_dm_sco_co_init
-**
-** Description      This function can be used by the phone to initialize audio
-**                  codec or for other initialization purposes before SCO connection
-**                  is opened.
-**
-**
-** Returns          tBTA_DM_SCO_ROUTE_TYPE: SCO routing configuration type.
-**
-*******************************************************************************/
-tBTA_DM_SCO_ROUTE_TYPE bta_dm_sco_co_init(UINT32 rx_bw, UINT32 tx_bw,
-        tBTA_CODEC_INFO *p_codec_type, UINT8 app_id)
-{
-    tBTM_SCO_ROUTE_TYPE route = BTA_DM_SCO_ROUTE_PCM;
-
-    BTIF_TRACE_DEBUG("bta_dm_sco_co_init");
-
-    /* set up SCO routing configuration if SCO over HCI app ID is used and run time
-        configuration is set to SCO over HCI */
-    /* HS invoke this call-out */
-    if (
-#if (BTA_HS_INCLUDED == TRUE ) && (BTA_HS_INCLUDED == TRUE)
-        (app_id == BTUI_DM_SCO_4_HS_APP_ID && btui_cfg.hs_sco_over_hci) ||
-#endif
-        /* AG invoke this call-out */
-        (app_id != BTUI_DM_SCO_4_HS_APP_ID && btui_cfg.ag_sco_over_hci )) {
-        route = btui_cb.sco_hci = BTA_DM_SCO_ROUTE_HCI;
-    }
-    /* no codec is is used for the SCO data */
-    if (p_codec_type->codec_type == BTA_SCO_CODEC_PCM && route == BTA_DM_SCO_ROUTE_HCI) {
-        /* initialize SCO codec */
-        if (!btui_sco_codec_init(rx_bw, tx_bw)) {
-            BTIF_TRACE_ERROR("codec initialization exception!");
-        }
-    }
-
-    return route;
-}
-
-
-
-/*******************************************************************************
-**
-** Function         bta_dm_sco_co_open
-**
-** Description      This function is executed when a SCO connection is open.
-**
-**
-** Returns          void
-**
-*******************************************************************************/
-void bta_dm_sco_co_open(UINT16 handle, UINT8 pkt_size, UINT16 event)
-{
-    tBTUI_SCO_CODEC_CFG cfg;
-
-    if (btui_cb.sco_hci) {
-        BTIF_TRACE_DEBUG("bta_dm_sco_co_open handle:%d pkt_size:%d", handle, pkt_size);
-        /* use dedicated SCO buffer pool for SCO TX data */
-        cfg.pool_id = HCI_SCO_POOL_ID;
-        cfg.p_cback = btui_sco_codec_callback;
-        cfg.pkt_size = pkt_size;
-        cfg.cb_event = event;
-        /* open and start the codec */
-        btui_sco_codec_open(&cfg);
-        btui_sco_codec_start(handle);
-    }
-}
-
-/*******************************************************************************
-**
-** Function         bta_dm_sco_co_close
-**
-** Description      This function is called when a SCO connection is closed
-**
-**
-** Returns          void
-**
-*******************************************************************************/
-void bta_dm_sco_co_close(void)
-{
-    if (btui_cb.sco_hci) {
-        BTIF_TRACE_DEBUG("bta_dm_sco_co_close close codec");
-        /* close sco codec */
-        btui_sco_codec_close();
-
-        btui_cb.sco_hci = FALSE;
-    }
-}
-
-/*******************************************************************************
-**
-** Function         bta_dm_sco_co_in_data
-**
-** Description      This function is called to send incoming SCO data to application.
-**
-** Returns          void
-**
-*******************************************************************************/
-void bta_dm_sco_co_in_data(BT_HDR  *p_buf)
-{
-    if (btui_cfg.sco_use_mic) {
-        btui_sco_codec_inqdata (p_buf);
-    } else {
-        osi_free(p_buf);
-    }
-}
-
-/*******************************************************************************
-**
-** Function         bta_dm_sco_co_out_data
-**
-** Description      This function is called to send SCO data over HCI.
-**
-** Returns          void
-**
-*******************************************************************************/
-void bta_dm_sco_co_out_data(BT_HDR  **p_buf)
-{
-    btui_sco_codec_readbuf(p_buf);
-}
-
-#endif /* #if (defined(BTIF_INCLUDED) && BTIF_INCLUDED == TRUE) */
-#endif /* #if (BTM_SCO_HCI_INCLUDED == TRUE ) && (BTM_SCO_INCLUDED == TRUE)*/
-
 
 #if (defined BLE_INCLUDED && BLE_INCLUDED == TRUE)
 /*******************************************************************************

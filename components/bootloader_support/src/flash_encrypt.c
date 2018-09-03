@@ -254,7 +254,7 @@ static esp_err_t encrypt_and_load_partition_table(esp_partition_info_t *partitio
         ESP_LOGE(TAG, "Failed to read partition table data");
         return err;
     }
-    if (esp_partition_table_basic_verify(partition_table, false, num_partitions) == ESP_OK) {
+    if (esp_partition_table_verify(partition_table, false, num_partitions) == ESP_OK) {
         ESP_LOGD(TAG, "partition table is plaintext. Encrypting...");
         esp_err_t err = esp_flash_encrypt_region(ESP_PARTITION_TABLE_OFFSET,
                                                  FLASH_SECTOR_SIZE);
@@ -281,7 +281,7 @@ static esp_err_t encrypt_partition(int index, const esp_partition_info_t *partit
     if (partition->type == PART_TYPE_APP) {
       /* check if the partition holds a valid unencrypted app */
       esp_image_metadata_t data_ignored;
-      err = esp_image_load(ESP_IMAGE_VERIFY,
+      err = esp_image_verify(ESP_IMAGE_VERIFY,
                            &partition->pos,
                            &data_ignored);
       should_encrypt = (err == ESP_OK);
@@ -336,4 +336,14 @@ esp_err_t esp_flash_encrypt_region(uint32_t src_addr, size_t data_length)
  flash_failed:
     ESP_LOGE(TAG, "flash operation failed: 0x%x", err);
     return err;
+}
+
+void esp_flash_write_protect_crypt_cnt() 
+{
+    uint32_t efuse_blk0 = REG_READ(EFUSE_BLK0_RDATA0_REG);
+    bool flash_crypt_wr_dis = efuse_blk0 & EFUSE_WR_DIS_FLASH_CRYPT_CNT;
+    if(!flash_crypt_wr_dis) { 
+        REG_WRITE(EFUSE_BLK0_WDATA0_REG, EFUSE_WR_DIS_FLASH_CRYPT_CNT);
+        esp_efuse_burn_new_values();
+    }
 }

@@ -85,6 +85,15 @@ static void tcpip_adapter_api_cb(void* api_msg)
     return;
 }
 
+static void tcpip_adapter_dhcps_cb(u8_t client_ip[4])
+{
+    ESP_LOGI(TAG,"softAP assign IP to station,IP is: %d.%d.%d.%d",
+                client_ip[0],client_ip[1],client_ip[2],client_ip[3]);
+    system_event_t evt;
+    evt.event_id = SYSTEM_EVENT_AP_STAIPASSIGNED;
+    esp_event_send(&evt);
+}
+
 void tcpip_adapter_init(void)
 {
     int ret;
@@ -152,7 +161,7 @@ static esp_err_t tcpip_adapter_update_default_netif(void)
     return ESP_OK;
 }
 
-esp_err_t tcpip_adapter_start(tcpip_adapter_if_t tcpip_if, uint8_t *mac, tcpip_adapter_ip_info_t *ip_info)
+static esp_err_t tcpip_adapter_start(tcpip_adapter_if_t tcpip_if, uint8_t *mac, tcpip_adapter_ip_info_t *ip_info)
 {
     netif_init_fn netif_init;
 
@@ -181,6 +190,8 @@ esp_err_t tcpip_adapter_start(tcpip_adapter_if_t tcpip_if, uint8_t *mac, tcpip_a
         netif_set_up(esp_netif[tcpip_if]);
 
         if (dhcps_status == TCPIP_ADAPTER_DHCP_INIT) {
+            dhcps_set_new_lease_cb(tcpip_adapter_dhcps_cb);
+            
             dhcps_start(esp_netif[tcpip_if], ip_info->ip);
 
             ESP_LOGD(TAG, "dhcp server start:(ip: " IPSTR ", mask: " IPSTR ", gw: " IPSTR ")",

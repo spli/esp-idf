@@ -36,12 +36,27 @@
  * Larger values increase startup delay. Smaller values may cause false positive
  * detection (i.e. oscillator runs for a few cycles and then stops).
  */
-#define XTAL_32K_DETECT_CYCLES  32
 #define SLOW_CLK_CAL_CYCLES     CONFIG_ESP32_RTC_CLK_CAL_CYCLES
 
 #define MHZ (1000000)
 
-static void select_rtc_slow_clk(rtc_slow_freq_t slow_clk);
+/* Indicates that this 32k oscillator gets input from external oscillator, rather
+ * than a crystal.
+ */
+#define EXT_OSC_FLAG    BIT(3)
+
+/* This is almost the same as rtc_slow_freq_t, except that we define
+ * an extra enum member for the external 32k oscillator.
+ * For convenience, lower 2 bits should correspond to rtc_slow_freq_t values.
+ */
+typedef enum {
+    SLOW_CLK_150K = RTC_SLOW_FREQ_RTC,          //!< Internal 150 kHz RC oscillator
+    SLOW_CLK_32K_XTAL = RTC_SLOW_FREQ_32K_XTAL, //!< External 32 kHz XTAL
+    SLOW_CLK_8MD256 = RTC_SLOW_FREQ_8MD256,     //!< Internal 8 MHz RC oscillator, divided by 256
+    SLOW_CLK_32K_EXT_OSC = RTC_SLOW_FREQ_32K_XTAL | EXT_OSC_FLAG //!< External 32k oscillator connected to 32K_XP pin
+} slow_clk_sel_t;
+
+static void select_rtc_slow_clk(slow_clk_sel_t slow_clk);
 
 // g_ticks_us defined in ROMs for PRO and APP CPU
 extern uint32_t g_ticks_per_us_pro;
@@ -72,50 +87,47 @@ void esp_clk_init(void)
 
     rtc_clk_fast_freq_set(RTC_FAST_FREQ_8M);
 
-#ifdef CONFIG_ESP32_RTC_CLOCK_SOURCE_EXTERNAL_CRYSTAL
-    select_rtc_slow_clk(RTC_SLOW_FREQ_32K_XTAL);
+#if defined(CONFIG_ESP32_RTC_CLOCK_SOURCE_EXTERNAL_CRYSTAL)
+    select_rtc_slow_clk(SLOW_CLK_32K_XTAL);
+#elif defined(CONFIG_ESP32_RTC_CLOCK_SOURCE_EXTERNAL_OSC)
+    select_rtc_slow_clk(SLOW_CLK_32K_EXT_OSC);
+#elif defined(CONFIG_ESP32_RTC_CLOCK_SOURCE_INTERNAL_8MD256)
+    select_rtc_slow_clk(SLOW_CLK_8MD256);
 #else
     select_rtc_slow_clk(RTC_SLOW_FREQ_RTC);
 #endif
 
-    uint32_t freq_mhz = CONFIG_ESP32_DEFAULT_CPU_FREQ_MHZ;
-    rtc_cpu_freq_t freq = RTC_CPU_FREQ_80M;
-    switch(freq_mhz) {
-        case 240:
-            freq = RTC_CPU_FREQ_240M;
-            break;
-        case 160:
-            freq = RTC_CPU_FREQ_160M;
-            break;
-        default:
-            freq_mhz = 80;
-            /* no break */
-        case 80:
-            freq = RTC_CPU_FREQ_80M;
-            break;
-    }
+    rtc_cpu_freq_config_t old_config, new_config;
+    rtc_clk_cpu_freq_get_config(&old_config);
+    const uint32_t old_freq_mhz = old_config.freq_mhz;
+    const uint32_t new_freq_mhz = CONFIG_ESP32_DEFAULT_CPU_FREQ_MHZ;
+
+    bool res = rtc_clk_cpu_freq_mhz_to_config(new_freq_mhz, &new_config);
+    assert(res);
 
     // Wait for UART TX to finish, otherwise some UART output will be lost
     // when switching APB frequency
     uart_tx_wait_idle(CONFIG_CONSOLE_UART_NUM);
     
-    uint32_t freq_before = rtc_clk_cpu_freq_value(rtc_clk_cpu_freq_get()) / MHZ ;
-    
-    rtc_clk_cpu_freq_set(freq);
+    rtc_clk_cpu_freq_set_config(&new_config);
 
     // Re calculate the ccount to make time calculation correct. 
-    uint32_t freq_after = CONFIG_ESP32_DEFAULT_CPU_FREQ_MHZ;
-    XTHAL_SET_CCOUNT( XTHAL_GET_CCOUNT() * freq_after / freq_before );
+    XTHAL_SET_CCOUNT( XTHAL_GET_CCOUNT() * new_freq_mhz / old_freq_mhz );
 }
 
 int IRAM_ATTR esp_clk_cpu_freq(void)
 {
-    return g_ticks_per_us_pro * 1000000;
+    return g_ticks_per_us_pro * MHZ;
 }
 
 int IRAM_ATTR esp_clk_apb_freq(void)
 {
-    return MIN(g_ticks_per_us_pro, 80) * 1000000;
+    return MIN(g_ticks_per_us_pro, 80) * MHZ;
+}
+
+int IRAM_ATTR esp_clk_xtal_freq(void)
+{
+    return rtc_clk_xtal_freq_get() * MHZ;
 }
 
 void IRAM_ATTR ets_update_cpu_frequency(uint32_t ticks_per_us)
@@ -125,11 +137,12 @@ void IRAM_ATTR ets_update_cpu_frequency(uint32_t ticks_per_us)
     g_ticks_per_us_app = ticks_per_us;
 }
 
-static void select_rtc_slow_clk(rtc_slow_freq_t slow_clk)
+static void select_rtc_slow_clk(slow_clk_sel_t slow_clk)
 {
+    rtc_slow_freq_t rtc_slow_freq = slow_clk & RTC_CNTL_ANA_CLK_RTC_SEL_V;
     uint32_t cal_val = 0;
     do {
-        if (slow_clk == RTC_SLOW_FREQ_32K_XTAL) {
+        if (rtc_slow_freq == RTC_SLOW_FREQ_32K_XTAL) {
             /* 32k XTAL oscillator needs to be enabled and running before it can
              * be used. Hardware doesn't have a direct way of checking if the
              * oscillator is running. Here we use rtc_clk_cal function to count
@@ -137,24 +150,24 @@ static void select_rtc_slow_clk(rtc_slow_freq_t slow_clk)
              * oscillator cycles. If the 32k XTAL has not started up, calibration
              * will time out, returning 0.
              */
-            uint32_t wait = 0;
-            // increment of 'wait' counter equivalent to 3 seconds
-            const uint32_t warning_timeout = 3 /* sec */ * 32768 /* Hz */ / (2 * XTAL_32K_DETECT_CYCLES);
             ESP_EARLY_LOGD(TAG, "waiting for 32k oscillator to start up");
-            do {
-                ++wait;
+            if (slow_clk == SLOW_CLK_32K_XTAL) {
                 rtc_clk_32k_enable(true);
-                cal_val = rtc_clk_cal(RTC_CAL_32K_XTAL, XTAL_32K_DETECT_CYCLES);
-                if (wait % warning_timeout == 0) {
-                    ESP_EARLY_LOGW(TAG, "still waiting for 32k oscillator to start up");
+            } else if (slow_clk == SLOW_CLK_32K_EXT_OSC) {
+                rtc_clk_32k_enable_external();
+            }
+            // When SLOW_CLK_CAL_CYCLES is set to 0, clock calibration will not be performed at startup.
+            if (SLOW_CLK_CAL_CYCLES > 0) {
+                cal_val = rtc_clk_cal(RTC_CAL_32K_XTAL, SLOW_CLK_CAL_CYCLES);
+                if (cal_val == 0 || cal_val < 15000000L) {
+                    ESP_EARLY_LOGW(TAG, "32 kHz XTAL not found, switching to internal 150 kHz oscillator");
+                    rtc_slow_freq = RTC_SLOW_FREQ_RTC;
                 }
-                if(cal_val == 0){
-                    rtc_clk_32k_enable(false);
-                    rtc_clk_32k_bootstrap(CONFIG_ESP32_RTC_XTAL_BOOTSTRAP_CYCLES);
-                }
-            } while (cal_val == 0);
+            }
+        } else if (rtc_slow_freq == RTC_SLOW_FREQ_8MD256) {
+            rtc_clk_8m_enable(true, true);
         }
-        rtc_clk_slow_freq_set(slow_clk);
+        rtc_clk_slow_freq_set(rtc_slow_freq);
 
         if (SLOW_CLK_CAL_CYCLES > 0) {
             /* TODO: 32k XTAL oscillator has some frequency drift at startup.
@@ -211,31 +224,12 @@ void esp_perip_clk_init(void)
     }
     else {
         common_perip_clk = DPORT_WDG_CLK_EN |
-                              DPORT_I2S0_CLK_EN |
-#if CONFIG_CONSOLE_UART_NUM != 0
-                              DPORT_UART_CLK_EN |
-#endif
-#if CONFIG_CONSOLE_UART_NUM != 1
-                              DPORT_UART1_CLK_EN |
-#endif
-#if CONFIG_CONSOLE_UART_NUM != 2
-                              DPORT_UART2_CLK_EN |
-#endif
-                              DPORT_SPI_CLK_EN |
-                              DPORT_I2C_EXT0_CLK_EN |
-                              DPORT_UHCI0_CLK_EN |
-                              DPORT_RMT_CLK_EN |
                               DPORT_PCNT_CLK_EN |
                               DPORT_LEDC_CLK_EN |
-                              DPORT_UHCI1_CLK_EN |
                               DPORT_TIMERGROUP1_CLK_EN |
-                              DPORT_SPI_CLK_EN_2 |
                               DPORT_PWM0_CLK_EN |
-                              DPORT_I2C_EXT1_CLK_EN |
                               DPORT_CAN_CLK_EN |
                               DPORT_PWM1_CLK_EN |
-                              DPORT_I2S1_CLK_EN |
-                              DPORT_SPI_DMA_CLK_EN |
                               DPORT_PWM2_CLK_EN |
                               DPORT_PWM3_CLK_EN;
         hwcrypto_perip_clk = DPORT_PERI_EN_AES |
@@ -251,13 +245,33 @@ void esp_perip_clk_init(void)
                               DPORT_WIFI_CLK_EMAC_EN;
     }
 
+    //Reset the communication peripherals like I2C, SPI, UART, I2S and bring them to known state.
+    common_perip_clk |= DPORT_I2S0_CLK_EN |
+#if CONFIG_CONSOLE_UART_NUM != 0
+                        DPORT_UART_CLK_EN |
+#endif
+#if CONFIG_CONSOLE_UART_NUM != 1
+                        DPORT_UART1_CLK_EN |
+#endif
+#if CONFIG_CONSOLE_UART_NUM != 2
+                        DPORT_UART2_CLK_EN |
+#endif
+                        DPORT_SPI2_CLK_EN |
+                        DPORT_I2C_EXT0_CLK_EN |
+                        DPORT_UHCI0_CLK_EN |
+                        DPORT_RMT_CLK_EN |
+                        DPORT_UHCI1_CLK_EN |
+                        DPORT_SPI3_CLK_EN |
+                        DPORT_I2C_EXT1_CLK_EN |
+                        DPORT_I2S1_CLK_EN |
+                        DPORT_SPI_DMA_CLK_EN;
 
 #if CONFIG_SPIRAM_SPEED_80M
-//80MHz SPIRAM uses SPI2 as well; it's initialized before this is called. Because it is used in
+//80MHz SPIRAM uses SPI3 as well; it's initialized before this is called. Because it is used in
 //a weird mode where clock to the peripheral is disabled but reset is also disabled, it 'hangs'
 //in a state where it outputs a continuous 80MHz signal. Mask its bit here because we should
 //not modify that state, regardless of what we calculated earlier.
-    common_perip_clk &= ~DPORT_SPI_CLK_EN_2;
+    common_perip_clk &= ~DPORT_SPI3_CLK_EN;
 #endif
 
     /* Change I2S clock to audio PLL first. Because if I2S uses 160MHz clock,

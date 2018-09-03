@@ -22,10 +22,10 @@ config MBEDTLS_SSL_MAX_CONTENT_LEN
     range 512 16384
     help
         Maximum TLS message length (in bytes) supported by mbedTLS.
-        
+
         16384 is the default and this value is required to comply
         fully with TLS standards.
-        
+
         However you can set a lower value in order to save RAM. This
         is safe if the other end of the connection supports Maximum
         Fragment Length Negotiation Extension (max_fragment_length,
@@ -277,6 +277,11 @@ config MBEDTLS_SSL_PROTO_DTLS
    help
        Requires TLS 1.1 to be enabled for DTLS 1.0
        Requires TLS 1.2 to be enabled for DTLS 1.2
+
+config MBEDTLS_SSL_DTLS_SRTP
+    bool "Support DTLS SRTP"
+    default n
+    depends on MBEDTLS_SSL_PROTO_DTLS
 
 config MBEDTLS_SSL_ALPN
    bool "Support ALPN (Application Layer Protocol Negotiation)"

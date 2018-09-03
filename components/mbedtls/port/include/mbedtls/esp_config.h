@@ -1264,6 +1264,19 @@
 */
 #define MBEDTLS_SSL_DTLS_SRTP
 
+/**  
+* \def MBEDTLS_SSL_DTLS_SRTP
+*
+* Enable support for DTLS-SRTP, RFC5764
+*
+* Requires: MBEDTLS_SSL_PROTO_DTLS
+*
+* Comment this to disable support for DTLS-SRTP.
+*/
+#ifdef CONFIG_MBEDTLS_SSL_DTLS_SRTP
+#define MBEDTLS_SSL_DTLS_SRTP
+#endif
+
 /**
  * \def MBEDTLS_SSL_DTLS_CLIENT_PORT_REUSE
  *
